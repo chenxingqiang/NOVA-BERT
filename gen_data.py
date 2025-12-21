@@ -243,7 +243,7 @@ def create_training_instances(all_documents_raw,
 #             if len(item_seq) <= max_num_tokens:
 #                 all_documents[user] = [item_seq]
 #             else:
-            beg_idx = range(len(item_seq)-max_num_tokens, 0, -sliding_step)
+            beg_idx = list(range(len(item_seq)-max_num_tokens, 0, -sliding_step))
             beg_idx.append(0)
             all_documents[user] = [
                 item_seq[i:i + max_num_tokens] for i in beg_idx[::-1]  
@@ -476,7 +476,7 @@ def main():
     output_dir = FLAGS.data_dir
     dataset_name = FLAGS.dataset_name
     version_id = FLAGS.signature
-    print version_id
+    print(version_id)
 
     if not os.path.isdir(output_dir):
         print(output_dir + ' is not exist')
