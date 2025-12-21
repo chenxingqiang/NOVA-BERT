@@ -1,4 +1,4 @@
-CKPT_DIR="/path/BERT4Rec"
+CKPT_DIR="./checkpoints"
 dataset_name="beauty"
 max_seq_length=50
 max_predictions_per_seq=30
@@ -28,7 +28,7 @@ python -u gen_data_fin.py \
     --pool_size=${pool_size} \
 
 
-CUDA_VISIBLE_DEVICES=1 python -u run.py \
+CUDA_VISIBLE_DEVICES=0 python -u run.py \
     --train_input_file=./data/${dataset_name}${signature}.train.tfrecord \
     --test_input_file=./data/${dataset_name}${signature}.test.tfrecord \
     --vocab_filename=./data/${dataset_name}${signature}.vocab \
