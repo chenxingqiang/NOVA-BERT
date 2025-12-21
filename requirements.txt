@@ -1,0 +1,14 @@
+# NOVA-BERT Requirements
+# TensorFlow 1.x (GPU version recommended for training)
+tensorflow-gpu>=1.12.0,<2.0.0
+
+# For CPU-only installation, use:
+# tensorflow>=1.12.0,<2.0.0
+
+# Core dependencies
+numpy>=1.16.0
+six>=1.12.0
+
+# Optional: For visualization and analysis
+# matplotlib>=3.0.0
+# pandas>=0.24.0
