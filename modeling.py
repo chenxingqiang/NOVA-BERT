@@ -254,6 +254,271 @@ class BertModel(object):
         return self.embedding_table
 
 
+class NOVABertConfig(object):
+    """Configuration for NOVABertModel with side information support."""
+
+    def __init__(self,
+                 vocab_size,
+                 hidden_size=768,
+                 num_hidden_layers=12,
+                 num_attention_heads=12,
+                 intermediate_size=3072,
+                 hidden_act="gelu",
+                 hidden_dropout_prob=0.1,
+                 attention_probs_dropout_prob=0.1,
+                 max_position_embeddings=512,
+                 type_vocab_size=16,
+                 initializer_range=0.02,
+                 # NOVA-specific parameters
+                 side_info_vocab_size=0,
+                 side_info_embedding_size=64,
+                 side_info_weight=0.5,
+                 use_side_info=False):
+        """Constructs NOVABertConfig.
+
+        Args:
+            vocab_size: Vocabulary size of item ids.
+            hidden_size: Size of the encoder layers.
+            num_hidden_layers: Number of hidden layers in the Transformer encoder.
+            num_attention_heads: Number of attention heads.
+            intermediate_size: Size of the feed-forward layer.
+            hidden_act: Activation function (gelu, relu, tanh).
+            hidden_dropout_prob: Dropout probability for hidden layers.
+            attention_probs_dropout_prob: Dropout probability for attention.
+            max_position_embeddings: Maximum sequence length.
+            type_vocab_size: Vocabulary size of token_type_ids.
+            initializer_range: Stdev of truncated_normal_initializer.
+            side_info_vocab_size: Size of side information vocabulary (e.g., categories).
+            side_info_embedding_size: Embedding dimension for side information.
+            side_info_weight: Weight (lambda) for side info attention. Default 0.5.
+            use_side_info: Whether to use side information in NOVA attention.
+        """
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.hidden_act = hidden_act
+        self.intermediate_size = intermediate_size
+        self.hidden_dropout_prob = hidden_dropout_prob
+        self.attention_probs_dropout_prob = attention_probs_dropout_prob
+        self.max_position_embeddings = max_position_embeddings
+        self.type_vocab_size = type_vocab_size
+        self.initializer_range = initializer_range
+        # NOVA-specific
+        self.side_info_vocab_size = side_info_vocab_size
+        self.side_info_embedding_size = side_info_embedding_size
+        self.side_info_weight = side_info_weight
+        self.use_side_info = use_side_info
+
+    @classmethod
+    def from_dict(cls, json_object):
+        """Constructs a NOVABertConfig from a Python dictionary."""
+        config = NOVABertConfig(vocab_size=None)
+        for (key, value) in six.iteritems(json_object):
+            config.__dict__[key] = value
+        return config
+
+    @classmethod
+    def from_json_file(cls, json_file):
+        """Constructs a NOVABertConfig from a json file."""
+        with tf.gfile.GFile(json_file, "r") as reader:
+            text = reader.read()
+        return cls.from_dict(json.loads(text))
+
+    def to_dict(self):
+        """Serializes this instance to a Python dictionary."""
+        output = copy.deepcopy(self.__dict__)
+        return output
+
+    def to_json_string(self):
+        """Serializes this instance to a JSON string."""
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+
+
+class NOVABertModel(object):
+    """NOVA-BERT: BERT with Non-invasive Self-Attention for Side Information Fusion.
+
+    This model implements the NOVA mechanism from:
+    "Non-invasive Self-attention for Side Information Fusion in Sequential
+    Recommendation" (https://arxiv.org/abs/2103.03578)
+
+    Key features:
+    - Uses side information (categories, tags, etc.) to improve attention
+    - Non-invasive: side info affects attention distribution, not item embeddings
+    - Falls back to standard BERT if side information is not provided
+
+    Example usage:
+
+    ```python
+    input_ids = tf.constant([[31, 51, 99], [15, 5, 0]])
+    input_mask = tf.constant([[1, 1, 1], [1, 1, 0]])
+    side_info_ids = tf.constant([[1, 2, 3], [1, 1, 0]])  # category ids
+
+    config = modeling.NOVABertConfig(
+        vocab_size=32000,
+        hidden_size=512,
+        side_info_vocab_size=100,
+        use_side_info=True)
+
+    model = modeling.NOVABertModel(
+        config=config,
+        is_training=True,
+        input_ids=input_ids,
+        input_mask=input_mask,
+        side_info_ids=side_info_ids)
+
+    output = model.get_sequence_output()
+    ```
+    """
+
+    def __init__(self,
+                 config,
+                 is_training,
+                 input_ids,
+                 input_mask=None,
+                 token_type_ids=None,
+                 side_info_ids=None,
+                 use_one_hot_embeddings=True,
+                 scope=None):
+        """Constructor for NOVABertModel.
+
+        Args:
+            config: NOVABertConfig or BertConfig instance.
+            is_training: bool. True for training, False for eval.
+            input_ids: int32 Tensor of shape [batch_size, seq_length]. Item ids.
+            input_mask: (optional) int32 Tensor of shape [batch_size, seq_length].
+            token_type_ids: (optional) int32 Tensor of shape [batch_size, seq_length].
+            side_info_ids: (optional) int32 Tensor of shape [batch_size, seq_length].
+                Side information ids (e.g., category, brand, etc.).
+            use_one_hot_embeddings: (optional) bool. Use one-hot for embeddings.
+            scope: (optional) variable scope. Defaults to "nova_bert".
+
+        Raises:
+            ValueError: The config is invalid or input tensor shapes are invalid.
+        """
+        config = copy.deepcopy(config)
+        if not is_training:
+            config.hidden_dropout_prob = 0.0
+            config.attention_probs_dropout_prob = 0.0
+
+        input_shape = get_shape_list(input_ids, expected_rank=2)
+        batch_size = input_shape[0]
+        seq_length = input_shape[1]
+
+        if input_mask is None:
+            input_mask = tf.ones(shape=[batch_size, seq_length], dtype=tf.int32)
+
+        if token_type_ids is None:
+            token_type_ids = tf.zeros(shape=[batch_size, seq_length], dtype=tf.int32)
+
+        # Check for NOVA-specific config attributes
+        use_side_info = getattr(config, 'use_side_info', False)
+        side_info_vocab_size = getattr(config, 'side_info_vocab_size', 0)
+        side_info_embedding_size = getattr(config, 'side_info_embedding_size', 64)
+        side_info_weight = getattr(config, 'side_info_weight', 0.5)
+
+        with tf.variable_scope(scope, default_name="nova_bert"):
+            with tf.variable_scope("embeddings"):
+                # Item embedding lookup
+                (self.embedding_output,
+                 self.embedding_table) = embedding_lookup(
+                    input_ids=input_ids,
+                    vocab_size=config.vocab_size,
+                    embedding_size=config.hidden_size,
+                    initializer_range=config.initializer_range,
+                    word_embedding_name="word_embeddings",
+                    use_one_hot_embeddings=use_one_hot_embeddings)
+
+                # Add positional embeddings
+                self.embedding_output = embedding_postprocessor(
+                    input_tensor=self.embedding_output,
+                    use_token_type=True,
+                    token_type_ids=token_type_ids,
+                    token_type_vocab_size=config.type_vocab_size,
+                    token_type_embedding_name="token_type_embeddings",
+                    use_position_embeddings=True,
+                    position_embedding_name="position_embeddings",
+                    initializer_range=config.initializer_range,
+                    max_position_embeddings=config.max_position_embeddings,
+                    dropout_prob=config.hidden_dropout_prob)
+
+                # Side information embedding (NOVA-specific)
+                self.side_info_embedding = None
+                if use_side_info and side_info_ids is not None and side_info_vocab_size > 0:
+                    with tf.variable_scope("side_info"):
+                        (self.side_info_embedding, _) = embedding_lookup(
+                            input_ids=side_info_ids,
+                            vocab_size=side_info_vocab_size,
+                            embedding_size=side_info_embedding_size,
+                            initializer_range=config.initializer_range,
+                            word_embedding_name="side_info_embeddings",
+                            use_one_hot_embeddings=use_one_hot_embeddings)
+
+                        # Project side info to hidden size for attention compatibility
+                        self.side_info_embedding = tf.layers.dense(
+                            self.side_info_embedding,
+                            config.hidden_size,
+                            kernel_initializer=create_initializer(config.initializer_range),
+                            name="side_info_projection")
+
+            with tf.variable_scope("encoder"):
+                attention_mask = create_attention_mask_from_input_mask(
+                    input_ids, input_mask)
+
+                # Use NOVA transformer if side info is available
+                if self.side_info_embedding is not None:
+                    self.all_encoder_layers = nova_transformer_model(
+                        input_tensor=self.embedding_output,
+                        side_info_tensor=self.side_info_embedding,
+                        attention_mask=attention_mask,
+                        hidden_size=config.hidden_size,
+                        num_hidden_layers=config.num_hidden_layers,
+                        num_attention_heads=config.num_attention_heads,
+                        intermediate_size=config.intermediate_size,
+                        intermediate_act_fn=get_activation(config.hidden_act),
+                        hidden_dropout_prob=config.hidden_dropout_prob,
+                        attention_probs_dropout_prob=config.attention_probs_dropout_prob,
+                        initializer_range=config.initializer_range,
+                        do_return_all_layers=True,
+                        side_info_weight=side_info_weight)
+                else:
+                    # Fall back to standard transformer
+                    self.all_encoder_layers = transformer_model(
+                        input_tensor=self.embedding_output,
+                        attention_mask=attention_mask,
+                        hidden_size=config.hidden_size,
+                        num_hidden_layers=config.num_hidden_layers,
+                        num_attention_heads=config.num_attention_heads,
+                        intermediate_size=config.intermediate_size,
+                        intermediate_act_fn=get_activation(config.hidden_act),
+                        hidden_dropout_prob=config.hidden_dropout_prob,
+                        attention_probs_dropout_prob=config.attention_probs_dropout_prob,
+                        initializer_range=config.initializer_range,
+                        do_return_all_layers=True)
+
+            self.sequence_output = self.all_encoder_layers[-1]
+
+    def get_sequence_output(self):
+        """Gets final hidden layer of encoder."""
+        return self.sequence_output
+
+    def get_all_encoder_layers(self):
+        """Gets all encoder layer outputs."""
+        return self.all_encoder_layers
+
+    def get_embedding_output(self):
+        """Gets output of the embedding layer."""
+        return self.embedding_output
+
+    def get_embedding_table(self):
+        """Gets the item embedding table."""
+        return self.embedding_table
+
+    def get_side_info_embedding(self):
+        """Gets the side information embedding (if available)."""
+        return self.side_info_embedding
+
+
 def gelu(input_tensor):
     """Gaussian Error Linear Unit.
 
@@ -551,6 +816,199 @@ def create_attention_mask_from_input_mask(from_tensor, to_mask):
     mask = broadcast_ones * to_mask
 
     return mask
+
+
+def nova_attention_layer(from_tensor,
+                         to_tensor,
+                         side_info_tensor=None,
+                         attention_mask=None,
+                         num_attention_heads=1,
+                         size_per_head=512,
+                         query_act=None,
+                         key_act=None,
+                         value_act=None,
+                         attention_probs_dropout_prob=0.0,
+                         initializer_range=0.02,
+                         do_return_2d_tensor=False,
+                         batch_size=None,
+                         from_seq_length=None,
+                         to_seq_length=None,
+                         side_info_weight=0.5):
+    """NOVA: Non-invasive Self-Attention with Side Information Fusion.
+
+    This implements the NOVA (NOninVasive self-Attention) mechanism from:
+    "Non-invasive Self-attention for Side Information Fusion in Sequential
+    Recommendation" (https://arxiv.org/abs/2103.03578)
+
+    Key insight: Instead of directly fusing side information into item embeddings
+    (which can cause information overwhelming), NOVA uses side information to
+    generate better attention distribution.
+
+    The attention score is computed as:
+        attention = softmax(Q_item * K_item^T + lambda * Q_side * K_side^T)
+
+    where lambda (side_info_weight) controls the influence of side information.
+
+    Args:
+        from_tensor: float Tensor of shape [batch_size, from_seq_length, from_width].
+            The item embeddings used as query source.
+        to_tensor: float Tensor of shape [batch_size, to_seq_length, to_width].
+            The item embeddings used as key/value source.
+        side_info_tensor: (optional) float Tensor of shape [batch_size, seq_length,
+            side_info_width]. Side information embeddings (e.g., category, tags).
+            If None, falls back to standard attention.
+        attention_mask: (optional) int32 Tensor of shape [batch_size,
+            from_seq_length, to_seq_length]. Values should be 1 or 0.
+        num_attention_heads: int. Number of attention heads.
+        size_per_head: int. Size of each attention head.
+        query_act: (optional) Activation function for the query transform.
+        key_act: (optional) Activation function for the key transform.
+        value_act: (optional) Activation function for the value transform.
+        attention_probs_dropout_prob: (optional) float. Dropout probability.
+        initializer_range: float. Range of the weight initializer.
+        do_return_2d_tensor: bool. Output shape control.
+        batch_size: (Optional) int. Batch size for 2D input tensors.
+        from_seq_length: (Optional) Sequence length for 2D input tensors.
+        to_seq_length: (Optional) Sequence length for 2D input tensors.
+        side_info_weight: float. Weight (lambda) for side information attention.
+            Default 0.5. Set to 0 to disable side info influence.
+
+    Returns:
+        float Tensor of shape [batch_size, from_seq_length,
+        num_attention_heads * size_per_head].
+    """
+
+    def transpose_for_scores(input_tensor, batch_size, num_attention_heads,
+                             seq_length, width):
+        output_tensor = tf.reshape(
+            input_tensor, [batch_size, seq_length, num_attention_heads, width])
+        output_tensor = tf.transpose(output_tensor, [0, 2, 1, 3])
+        return output_tensor
+
+    from_shape = get_shape_list(from_tensor, expected_rank=[2, 3])
+    to_shape = get_shape_list(to_tensor, expected_rank=[2, 3])
+
+    if len(from_shape) != len(to_shape):
+        raise ValueError(
+            "The rank of `from_tensor` must match the rank of `to_tensor`.")
+
+    if len(from_shape) == 3:
+        batch_size = from_shape[0]
+        from_seq_length = from_shape[1]
+        to_seq_length = to_shape[1]
+    elif len(from_shape) == 2:
+        if (batch_size is None or from_seq_length is None
+                or to_seq_length is None):
+            raise ValueError(
+                "When passing in rank 2 tensors to attention_layer, the values "
+                "for `batch_size`, `from_seq_length`, and `to_seq_length` "
+                "must all be specified.")
+
+    from_tensor_2d = reshape_to_matrix(from_tensor)
+    to_tensor_2d = reshape_to_matrix(to_tensor)
+
+    # Item-based Query, Key, Value projections
+    query_layer = tf.layers.dense(
+        from_tensor_2d,
+        num_attention_heads * size_per_head,
+        activation=query_act,
+        name="query",
+        kernel_initializer=create_initializer(initializer_range))
+
+    key_layer = tf.layers.dense(
+        to_tensor_2d,
+        num_attention_heads * size_per_head,
+        activation=key_act,
+        name="key",
+        kernel_initializer=create_initializer(initializer_range))
+
+    value_layer = tf.layers.dense(
+        to_tensor_2d,
+        num_attention_heads * size_per_head,
+        activation=value_act,
+        name="value",
+        kernel_initializer=create_initializer(initializer_range))
+
+    # Reshape for multi-head attention
+    query_layer = transpose_for_scores(query_layer, batch_size,
+                                       num_attention_heads, from_seq_length,
+                                       size_per_head)
+    key_layer = transpose_for_scores(key_layer, batch_size,
+                                     num_attention_heads, to_seq_length,
+                                     size_per_head)
+
+    # Compute item-based attention scores: Q_item * K_item^T
+    attention_scores = tf.matmul(query_layer, key_layer, transpose_b=True)
+    attention_scores = tf.multiply(attention_scores,
+                                   1.0 / math.sqrt(float(size_per_head)))
+
+    # NOVA: Add side information attention if available
+    if side_info_tensor is not None and side_info_weight > 0:
+        side_info_2d = reshape_to_matrix(side_info_tensor)
+
+        # Side information Query and Key projections (non-invasive)
+        with tf.variable_scope("side_info"):
+            side_query_layer = tf.layers.dense(
+                side_info_2d,
+                num_attention_heads * size_per_head,
+                activation=query_act,
+                name="side_query",
+                kernel_initializer=create_initializer(initializer_range))
+
+            side_key_layer = tf.layers.dense(
+                side_info_2d,
+                num_attention_heads * size_per_head,
+                activation=key_act,
+                name="side_key",
+                kernel_initializer=create_initializer(initializer_range))
+
+        # Reshape side info for multi-head attention
+        side_query_layer = transpose_for_scores(
+            side_query_layer, batch_size, num_attention_heads,
+            from_seq_length, size_per_head)
+        side_key_layer = transpose_for_scores(
+            side_key_layer, batch_size, num_attention_heads,
+            to_seq_length, size_per_head)
+
+        # Compute side info attention scores: Q_side * K_side^T
+        side_attention_scores = tf.matmul(
+            side_query_layer, side_key_layer, transpose_b=True)
+        side_attention_scores = tf.multiply(
+            side_attention_scores, 1.0 / math.sqrt(float(size_per_head)))
+
+        # NOVA fusion: Combine item and side info attention scores
+        # attention = item_attention + lambda * side_attention
+        attention_scores = attention_scores + side_info_weight * side_attention_scores
+
+    # Apply attention mask
+    if attention_mask is not None:
+        attention_mask = tf.expand_dims(attention_mask, axis=[1])
+        adder = (1.0 - tf.cast(attention_mask, tf.float32)) * -10000.0
+        attention_scores += adder
+
+    # Normalize attention scores to probabilities
+    attention_probs = tf.nn.softmax(attention_scores)
+    attention_probs = dropout(attention_probs, attention_probs_dropout_prob)
+
+    # Compute context from values (using original item embeddings, not side info)
+    value_layer = tf.reshape(
+        value_layer,
+        [batch_size, to_seq_length, num_attention_heads, size_per_head])
+    value_layer = tf.transpose(value_layer, [0, 2, 1, 3])
+
+    context_layer = tf.matmul(attention_probs, value_layer)
+    context_layer = tf.transpose(context_layer, [0, 2, 1, 3])
+
+    if do_return_2d_tensor:
+        context_layer = tf.reshape(context_layer, [
+            batch_size * from_seq_length, num_attention_heads * size_per_head
+        ])
+    else:
+        context_layer = tf.reshape(
+            context_layer,
+            [batch_size, from_seq_length, num_attention_heads * size_per_head])
+
+    return context_layer
 
 
 def attention_layer(from_tensor,
@@ -876,6 +1334,142 @@ def transformer_model(input_tensor,
                     kernel_initializer=create_initializer(initializer_range))
 
             # Down-project back to `hidden_size` then add the residual.
+            with tf.variable_scope("output"):
+                layer_output = tf.layers.dense(
+                    intermediate_output,
+                    hidden_size,
+                    kernel_initializer=create_initializer(initializer_range))
+                layer_output = dropout(layer_output, hidden_dropout_prob)
+                layer_output = layer_norm(layer_output + attention_output)
+                prev_output = layer_output
+                all_layer_outputs.append(layer_output)
+
+    if do_return_all_layers:
+        final_outputs = []
+        for layer_output in all_layer_outputs:
+            final_output = reshape_from_matrix(layer_output, input_shape)
+            final_outputs.append(final_output)
+        return final_outputs
+    else:
+        final_output = reshape_from_matrix(prev_output, input_shape)
+        return final_output
+
+
+def nova_transformer_model(input_tensor,
+                           side_info_tensor=None,
+                           attention_mask=None,
+                           hidden_size=768,
+                           num_hidden_layers=12,
+                           num_attention_heads=12,
+                           intermediate_size=3072,
+                           intermediate_act_fn=gelu,
+                           hidden_dropout_prob=0.1,
+                           attention_probs_dropout_prob=0.1,
+                           initializer_range=0.02,
+                           do_return_all_layers=False,
+                           side_info_weight=0.5):
+    """NOVA Transformer with Non-invasive Side Information Fusion.
+
+    This is the NOVA-enhanced Transformer that uses side information to improve
+    attention distribution without directly modifying item embeddings.
+
+    Reference: "Non-invasive Self-attention for Side Information Fusion in
+    Sequential Recommendation" (https://arxiv.org/abs/2103.03578)
+
+    Args:
+        input_tensor: float Tensor of shape [batch_size, seq_length, hidden_size].
+            The item embeddings.
+        side_info_tensor: (optional) float Tensor of shape [batch_size, seq_length,
+            side_info_size]. Side information embeddings (category, tags, etc.).
+            If None, falls back to standard transformer behavior.
+        attention_mask: (optional) int32 Tensor of shape [batch_size, seq_length,
+            seq_length], with 1 for positions that can be attended to and 0 in
+            positions that should not be.
+        hidden_size: int. Hidden size of the Transformer.
+        num_hidden_layers: int. Number of layers (blocks) in the Transformer.
+        num_attention_heads: int. Number of attention heads in the Transformer.
+        intermediate_size: int. The size of the intermediate (feed-forward) layer.
+        intermediate_act_fn: function. Activation function for intermediate layer.
+        hidden_dropout_prob: float. Dropout probability for the hidden layers.
+        attention_probs_dropout_prob: float. Dropout probability of attention.
+        initializer_range: float. Range of the initializer.
+        do_return_all_layers: Whether to return all layers or just the final layer.
+        side_info_weight: float. Weight for side information in attention.
+            Default 0.5. Set to 0 to disable side info influence.
+
+    Returns:
+        float Tensor of shape [batch_size, seq_length, hidden_size], the final
+        hidden layer of the NOVA Transformer.
+    """
+    if hidden_size % num_attention_heads != 0:
+        raise ValueError(
+            "The hidden size (%d) is not a multiple of the number of attention "
+            "heads (%d)" % (hidden_size, num_attention_heads))
+
+    attention_head_size = int(hidden_size / num_attention_heads)
+    input_shape = get_shape_list(input_tensor, expected_rank=3)
+    batch_size = input_shape[0]
+    seq_length = input_shape[1]
+    input_width = input_shape[2]
+
+    if input_width != hidden_size:
+        raise ValueError(
+            "The width of the input tensor (%d) != hidden size (%d)" %
+            (input_width, hidden_size))
+
+    # Process side information if provided
+    side_info_2d = None
+    if side_info_tensor is not None:
+        side_info_2d = reshape_to_matrix(side_info_tensor)
+
+    prev_output = reshape_to_matrix(input_tensor)
+
+    all_layer_outputs = []
+    for layer_idx in range(num_hidden_layers):
+        with tf.variable_scope("layer_%d" % layer_idx):
+            layer_input = prev_output
+
+            with tf.variable_scope("attention"):
+                attention_heads = []
+                with tf.variable_scope("self"):
+                    # Use NOVA attention with side information
+                    attention_head = nova_attention_layer(
+                        from_tensor=layer_input,
+                        to_tensor=layer_input,
+                        side_info_tensor=side_info_2d,
+                        attention_mask=attention_mask,
+                        num_attention_heads=num_attention_heads,
+                        size_per_head=attention_head_size,
+                        attention_probs_dropout_prob=attention_probs_dropout_prob,
+                        initializer_range=initializer_range,
+                        do_return_2d_tensor=True,
+                        batch_size=batch_size,
+                        from_seq_length=seq_length,
+                        to_seq_length=seq_length,
+                        side_info_weight=side_info_weight)
+                    attention_heads.append(attention_head)
+
+                attention_output = None
+                if len(attention_heads) == 1:
+                    attention_output = attention_heads[0]
+                else:
+                    attention_output = tf.concat(attention_heads, axis=-1)
+
+                with tf.variable_scope("output"):
+                    attention_output = tf.layers.dense(
+                        attention_output,
+                        hidden_size,
+                        kernel_initializer=create_initializer(initializer_range))
+                    attention_output = dropout(attention_output, hidden_dropout_prob)
+                    attention_output = layer_norm(attention_output + layer_input)
+
+            with tf.variable_scope("intermediate"):
+                intermediate_output = tf.layers.dense(
+                    attention_output,
+                    intermediate_size,
+                    activation=intermediate_act_fn,
+                    kernel_initializer=create_initializer(initializer_range))
+
             with tf.variable_scope("output"):
                 layer_output = tf.layers.dense(
                     intermediate_output,

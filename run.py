@@ -118,6 +118,13 @@ flags.DEFINE_bool("use_pop_random", True, "use pop random negative samples")
 flags.DEFINE_string("vocab_filename", None, "vocab filename")
 flags.DEFINE_string("user_history_filename", None, "user history filename")
 
+# NOVA-specific parameters
+flags.DEFINE_bool("use_nova", False, "Whether to use NOVA attention mechanism")
+flags.DEFINE_bool("use_side_info", False, "Whether to use side information in NOVA")
+flags.DEFINE_integer("side_info_vocab_size", 0, "Side information vocabulary size")
+flags.DEFINE_integer("side_info_embedding_size", 64, "Side information embedding size")
+flags.DEFINE_float("side_info_weight", 0.5, "Weight for side information in attention")
+
 
 
 class EvalHooks(tf.train.SessionRunHook):
@@ -231,8 +238,20 @@ class EvalHooks(tf.train.SessionRunHook):
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings, item_size):
-    """Returns `model_fn` closure for TPUEstimator."""
+                     use_one_hot_embeddings, item_size, use_nova=False):
+    """Returns `model_fn` closure for TPUEstimator.
+
+    Args:
+        bert_config: BertConfig or NOVABertConfig instance.
+        init_checkpoint: Initial checkpoint path.
+        learning_rate: Learning rate for optimizer.
+        num_train_steps: Total number of training steps.
+        num_warmup_steps: Number of warmup steps.
+        use_tpu: Whether to use TPU.
+        use_one_hot_embeddings: Whether to use one-hot embeddings.
+        item_size: Number of items in vocabulary.
+        use_nova: Whether to use NOVA model with side information fusion.
+    """
 
     def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
         """The `model_fn` for TPUEstimator."""
@@ -249,19 +268,31 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         masked_lm_ids = features["masked_lm_ids"]
         masked_lm_weights = features["masked_lm_weights"]
 
+        # Get side information if available (NOVA-specific)
+        side_info_ids = features.get("side_info_ids", None)
+
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
-        model = modeling.BertModel(
-            config=bert_config,
-            is_training=is_training,
-            input_ids=input_ids,
-            input_mask=input_mask,
-            token_type_ids=None,
-            use_one_hot_embeddings=use_one_hot_embeddings)
-        
-#         all_user_and_item = model.get_embedding_table()
-#         item_ids = [i for i in range(0, item_size + 1)]
-#         softmax_output_embedding = tf.nn.embedding_lookup(all_user_and_item, item_ids)
+        # Choose model based on use_nova flag
+        if use_nova:
+            tf.logging.info("*** Using NOVA-BERT Model ***")
+            model = modeling.NOVABertModel(
+                config=bert_config,
+                is_training=is_training,
+                input_ids=input_ids,
+                input_mask=input_mask,
+                token_type_ids=None,
+                side_info_ids=side_info_ids,
+                use_one_hot_embeddings=use_one_hot_embeddings)
+        else:
+            tf.logging.info("*** Using Standard BERT Model ***")
+            model = modeling.BertModel(
+                config=bert_config,
+                is_training=is_training,
+                input_ids=input_ids,
+                input_mask=input_mask,
+                token_type_ids=None,
+                use_one_hot_embeddings=use_one_hot_embeddings)
 
         (masked_lm_loss,
          masked_lm_example_loss, masked_lm_log_probs) = get_masked_lm_output(
@@ -425,8 +456,18 @@ def input_fn_builder(input_files,
                      max_seq_length,
                      max_predictions_per_seq,
                      is_training,
-                     num_cpu_threads=4):
-    """Creates an `input_fn` closure to be passed to TPUEstimator."""
+                     num_cpu_threads=4,
+                     use_side_info=False):
+    """Creates an `input_fn` closure to be passed to TPUEstimator.
+
+    Args:
+        input_files: List of input TFRecord files.
+        max_seq_length: Maximum sequence length.
+        max_predictions_per_seq: Maximum predictions per sequence.
+        is_training: Whether this is for training.
+        num_cpu_threads: Number of CPU threads for data loading.
+        use_side_info: Whether to load side information (NOVA-specific).
+    """
 
     def input_fn(params):
         """The actual input function."""
@@ -446,6 +487,11 @@ def input_fn_builder(input_files,
             "masked_lm_weights":
             tf.FixedLenFeature([max_predictions_per_seq], tf.float32)
         }
+
+        # Add side information feature if using NOVA
+        if use_side_info:
+            name_to_features["side_info_ids"] = tf.FixedLenFeature(
+                [max_seq_length], tf.int64)
 
         # For training, we want a lot of parallel reading and shuffling.
         # For eval, we want no shuffling and parallel reading doesn't matter.
@@ -503,7 +549,21 @@ def main(_):
         raise ValueError(
             "At least one of `do_train` or `do_eval` must be True.")
 
-    bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
+    # Load config - use NOVABertConfig if NOVA is enabled
+    if FLAGS.use_nova:
+        tf.logging.info("*** Loading NOVA-BERT Configuration ***")
+        bert_config = modeling.NOVABertConfig.from_json_file(FLAGS.bert_config_file)
+        # Override NOVA-specific parameters from flags if not in config
+        if not hasattr(bert_config, 'use_side_info') or FLAGS.use_side_info:
+            bert_config.use_side_info = FLAGS.use_side_info
+        if not hasattr(bert_config, 'side_info_vocab_size') or FLAGS.side_info_vocab_size > 0:
+            bert_config.side_info_vocab_size = FLAGS.side_info_vocab_size
+        if not hasattr(bert_config, 'side_info_embedding_size'):
+            bert_config.side_info_embedding_size = FLAGS.side_info_embedding_size
+        if not hasattr(bert_config, 'side_info_weight'):
+            bert_config.side_info_weight = FLAGS.side_info_weight
+    else:
+        bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
     tf.gfile.MakeDirs(FLAGS.checkpointDir)
 
@@ -546,7 +606,8 @@ def main(_):
         num_warmup_steps=FLAGS.num_warmup_steps,
         use_tpu=FLAGS.use_tpu,
         use_one_hot_embeddings=FLAGS.use_tpu,
-        item_size=item_size)
+        item_size=item_size,
+        use_nova=FLAGS.use_nova)
 
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
@@ -564,7 +625,8 @@ def main(_):
             input_files=train_input_files,
             max_seq_length=FLAGS.max_seq_length,
             max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-            is_training=True)
+            is_training=True,
+            use_side_info=FLAGS.use_side_info)
         estimator.train(
             input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
@@ -576,7 +638,8 @@ def main(_):
             input_files=test_input_files,
             max_seq_length=FLAGS.max_seq_length,
             max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-            is_training=False)
+            is_training=False,
+            use_side_info=FLAGS.use_side_info)
 
         #tf.logging.info('special eval ops:', special_eval_ops)
         result = estimator.evaluate(

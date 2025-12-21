@@ -1,18 +1,51 @@
 # NOVA-BERT
 
-A BERT-based Sequential Recommendation System built on the BERT4Rec architecture for sequential recommendation tasks.
+**N**on-invasive Self-Attention for Side Information Fusion in Sequential Recommendation
 
-## Overview
+This repository implements NOVA-BERT, which enhances the BERT4Rec architecture with the NOVA (NOninVasive self-Attention) mechanism for incorporating side information (e.g., item categories, tags) into sequential recommendations.
 
-NOVA-BERT applies the bidirectional self-attention mechanism from BERT to model user behavior sequences for next-item prediction. This implementation supports multiple datasets and provides a complete pipeline for data preprocessing, training, and evaluation.
+## Paper Reference
+
+This implementation is based on:
+
+> **Non-invasive Self-attention for Side Information Fusion in Sequential Recommendation**
+>
+> Liu, Chang; Li, Xiaoguang; Cai, Guohao; Dong, Zhenhua; Zhu, Hong; Shang, Lifeng
+>
+> arXiv:2103.03578 (2021)
+>
+> https://arxiv.org/abs/2103.03578
+
+## Key Innovation: NOVA Mechanism
+
+Traditional approaches directly fuse side information into item embeddings, which can cause **information overwhelming**. NOVA takes a different approach:
+
+- **Non-invasive**: Side information affects the **attention distribution**, not the item embeddings
+- **Better Attention**: Uses side info to generate more informative attention weights
+- **Preserved Embeddings**: Item embeddings remain intact, preserving their learned representations
+
+### How NOVA Works
+
+```
+Standard Attention:
+    attention = softmax(Q_item · K_item^T)
+
+NOVA Attention:
+    attention = softmax(Q_item · K_item^T + λ · Q_side · K_side^T)
+```
+
+Where:
+- `Q_item, K_item`: Query and Key from item embeddings
+- `Q_side, K_side`: Query and Key from side information (categories, tags, etc.)
+- `λ (lambda)`: Weight controlling side information influence (default: 0.5)
 
 ## Features
 
-- **Bidirectional Self-Attention**: Leverages BERT's masked language model approach for sequential recommendation
-- **Multi-head Attention**: Configurable attention heads for capturing different aspects of user preferences
-- **Position Embeddings**: Learns positional information of items in sequences
-- **Masked Item Prediction**: Predicts masked items in user sequences for training
-- **Flexible Configuration**: Supports various hidden sizes (64, 128, 256) and model architectures
+- **NOVA Attention Mechanism**: Non-invasive side information fusion
+- **Bidirectional Self-Attention**: BERT's masked language model for sequences
+- **Multi-head Attention**: Configurable attention heads
+- **Position Embeddings**: Learned positional information
+- **Backward Compatible**: Falls back to standard BERT4Rec when no side info
 
 ## Requirements
 
@@ -23,6 +56,7 @@ NOVA-BERT applies the bidirectional self-attention mechanism from BERT to model 
 - Six
 
 Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -31,73 +65,39 @@ pip install -r requirements.txt
 
 ```
 NOVA-BERT/
-├── modeling.py          # BERT model architecture
+├── modeling.py          # BERT + NOVA model architectures
+│   ├── BertModel        # Standard BERT model
+│   ├── NOVABertModel    # NOVA-enhanced BERT model
+│   ├── nova_attention_layer()     # NOVA attention implementation
+│   └── nova_transformer_model()   # NOVA transformer
 ├── optimization.py      # Adam optimizer with weight decay
-├── run.py              # Main training and evaluation script
+├── run.py              # Main training script (supports --use_nova)
 ├── gen_data_fin.py     # Data generation with multiprocessing
-├── gen_data.py         # Alternative data generation script
 ├── vocab.py            # Vocabulary management
-├── util.py             # Utility functions for data processing
+├── util.py             # Utility functions
 ├── bert_train/         # Model configuration files
-│   ├── bert_config_*_64.json
-│   ├── bert_config_*_128.json
-│   └── bert_config_*_256.json
 ├── data/               # Dataset files
-│   ├── ml-1m.txt       # MovieLens 1M dataset
-│   ├── ml-20m.zip      # MovieLens 20M dataset
-│   ├── beauty.txt      # Amazon Beauty dataset
-│   └── steam.txt       # Steam games dataset
-└── run_*.sh            # Training scripts for each dataset
+└── run_*.sh            # Training scripts
 ```
-
-## Supported Datasets
-
-| Dataset | Description | File |
-|---------|-------------|------|
-| ML-1M | MovieLens 1 Million ratings | `data/ml-1m.txt` |
-| ML-20M | MovieLens 20 Million ratings | `data/ml-20m.zip` |
-| Beauty | Amazon Beauty product reviews | `data/beauty.txt` |
-| Steam | Steam video game platform | `data/steam.txt` |
 
 ## Quick Start
 
-### 1. Run with MovieLens-1M Dataset
+### Standard BERT4Rec Mode
 
 ```bash
 ./run_ml-1m.sh
 ```
 
-This script performs two steps:
-1. **Data Generation**: Creates masked training data from user sequences
-2. **Model Training**: Trains the NOVA-BERT model and evaluates performance
-
-### 2. Manual Execution
-
-#### Step 1: Generate Training Data
-
-```bash
-python -u gen_data_fin.py \
-    --dataset_name=ml-1m \
-    --max_seq_length=200 \
-    --max_predictions_per_seq=40 \
-    --mask_prob=1.0 \
-    --dupe_factor=10 \
-    --masked_lm_prob=0.2 \
-    --prop_sliding_window=0.5 \
-    --signature="-default" \
-    --pool_size=10
-```
-
-#### Step 2: Train the Model
+### NOVA Mode with Side Information
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -u run.py \
-    --train_input_file=./data/ml-1m-default.train.tfrecord \
-    --test_input_file=./data/ml-1m-default.test.tfrecord \
-    --vocab_filename=./data/ml-1m-default.vocab \
-    --user_history_filename=./data/ml-1m-default.his \
-    --checkpointDir=./checkpoints/ml-1m \
-    --signature=-default-64 \
+    --train_input_file=./data/ml-1m.train.tfrecord \
+    --test_input_file=./data/ml-1m.test.tfrecord \
+    --vocab_filename=./data/ml-1m.vocab \
+    --user_history_filename=./data/ml-1m.his \
+    --checkpointDir=./checkpoints/ml-1m-nova \
+    --signature=-nova \
     --do_train=True \
     --do_eval=True \
     --bert_config_file=./bert_train/bert_config_ml-1m_64.json \
@@ -105,15 +105,26 @@ CUDA_VISIBLE_DEVICES=0 python -u run.py \
     --max_seq_length=200 \
     --max_predictions_per_seq=40 \
     --num_train_steps=400000 \
-    --num_warmup_steps=100 \
-    --learning_rate=1e-4
+    --learning_rate=1e-4 \
+    --use_nova=True \
+    --use_side_info=True \
+    --side_info_vocab_size=100 \
+    --side_info_weight=0.5
 ```
+
+## NOVA-Specific Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--use_nova` | Enable NOVA model | False |
+| `--use_side_info` | Use side information in attention | False |
+| `--side_info_vocab_size` | Size of side info vocabulary (e.g., # categories) | 0 |
+| `--side_info_embedding_size` | Embedding dimension for side info | 64 |
+| `--side_info_weight` | Weight (λ) for side info attention | 0.5 |
 
 ## Configuration
 
-### Model Hyperparameters
-
-Configuration files are located in `bert_train/`. Example configuration (`bert_config_ml-1m_64.json`):
+### Standard Configuration (`bert_config_ml-1m_64.json`)
 
 ```json
 {
@@ -131,76 +142,131 @@ Configuration files are located in `bert_train/`. Example configuration (`bert_c
 }
 ```
 
-### Key Parameters
+### NOVA Configuration (with side info)
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `hidden_size` | Dimension of hidden layers | 64/128/256 |
-| `num_hidden_layers` | Number of transformer layers | 2 |
-| `num_attention_heads` | Number of attention heads | 2 |
-| `intermediate_size` | Feed-forward layer size | 256 |
-| `max_position_embeddings` | Maximum sequence length | 200 |
-| `hidden_dropout_prob` | Dropout rate for hidden layers | 0.2 |
-| `attention_probs_dropout_prob` | Dropout rate for attention | 0.2 |
+```json
+{
+  "attention_probs_dropout_prob": 0.2,
+  "hidden_act": "gelu",
+  "hidden_dropout_prob": 0.2,
+  "hidden_size": 64,
+  "initializer_range": 0.02,
+  "intermediate_size": 256,
+  "max_position_embeddings": 200,
+  "num_attention_heads": 2,
+  "num_hidden_layers": 2,
+  "type_vocab_size": 2,
+  "vocab_size": 3420,
+  "use_side_info": true,
+  "side_info_vocab_size": 100,
+  "side_info_embedding_size": 64,
+  "side_info_weight": 0.5
+}
+```
 
-### Training Parameters
+## Model Classes
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `max_seq_length` | Maximum sequence length | 200 |
-| `batch_size` | Training batch size | 256 |
-| `learning_rate` | Initial learning rate | 1e-4 |
-| `num_train_steps` | Total training steps | 400000 |
-| `num_warmup_steps` | Warmup steps | 100 |
-| `masked_lm_prob` | Probability of masking items | 0.2 |
-| `dupe_factor` | Data duplication factor | 10 |
+### NOVABertModel
+
+```python
+import modeling
+
+# Create NOVA config
+config = modeling.NOVABertConfig(
+    vocab_size=32000,
+    hidden_size=64,
+    num_hidden_layers=2,
+    num_attention_heads=2,
+    intermediate_size=256,
+    use_side_info=True,
+    side_info_vocab_size=100,
+    side_info_weight=0.5
+)
+
+# Create NOVA model
+model = modeling.NOVABertModel(
+    config=config,
+    is_training=True,
+    input_ids=input_ids,           # [batch, seq_len] item ids
+    input_mask=input_mask,         # [batch, seq_len] mask
+    side_info_ids=category_ids     # [batch, seq_len] category ids
+)
+
+# Get outputs
+sequence_output = model.get_sequence_output()
+embedding_table = model.get_embedding_table()
+```
+
+### nova_attention_layer
+
+```python
+# Direct use of NOVA attention
+context = modeling.nova_attention_layer(
+    from_tensor=query_tensor,
+    to_tensor=key_value_tensor,
+    side_info_tensor=side_info_embeddings,  # Non-invasive side info
+    attention_mask=mask,
+    num_attention_heads=2,
+    size_per_head=32,
+    side_info_weight=0.5
+)
+```
+
+## Supported Datasets
+
+| Dataset | Description | File |
+|---------|-------------|------|
+| ML-1M | MovieLens 1 Million ratings | `data/ml-1m.txt` |
+| ML-20M | MovieLens 20 Million ratings | `data/ml-20m.zip` |
+| Beauty | Amazon Beauty products | `data/beauty.txt` |
+| Steam | Steam video games | `data/steam.txt` |
 
 ## Evaluation Metrics
 
-The model is evaluated using the following metrics:
 - **NDCG@K** (Normalized Discounted Cumulative Gain): K = 1, 5, 10
 - **Hit@K** (Hit Rate): K = 1, 5, 10
 - **MRR** (Mean Reciprocal Rank)
 
 ## Data Format
 
-Input data files should be in the format:
+### Basic Format (user-item pairs)
+
 ```
 user_id item_id
 user_id item_id
 ...
 ```
 
-Each line represents a user-item interaction, sorted by timestamp for each user.
+### With Side Information
 
-## Extending to New Datasets
+To use NOVA with side information, prepare an additional file mapping items to categories:
 
-1. Prepare your data in the required format (`user_id item_id` per line)
-2. Place the data file in `./data/your_dataset.txt`
-3. Create a configuration file in `./bert_train/bert_config_your_dataset_64.json`
-4. Update the `vocab_size` in the config based on your item count
-5. Run the training pipeline
+```
+item_id category_id
+item_id category_id
+...
+```
 
 ## Citation
 
-This implementation is based on the BERT4Rec paper:
+If you use this code, please cite both papers:
 
 ```bibtex
-@inproceedings{Sun:2019:BSR:3357384.3357895,
+@article{liu2021noninvasive,
+  title={Non-invasive Self-attention for Side Information Fusion in Sequential Recommendation},
+  author={Liu, Chang and Li, Xiaoguang and Cai, Guohao and Dong, Zhenhua and Zhu, Hong and Shang, Lifeng},
+  journal={arXiv preprint arXiv:2103.03578},
+  year={2021}
+}
+
+@inproceedings{sun2019bert4rec,
   author = {Sun, Fei and Liu, Jun and Wu, Jian and Pei, Changhua and Lin, Xiao and Ou, Wenwu and Jiang, Peng},
   title = {BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer},
   booktitle = {Proceedings of the 28th ACM International Conference on Information and Knowledge Management},
   series = {CIKM '19},
   year = {2019},
-  isbn = {978-1-4503-6976-3},
-  location = {Beijing, China},
   pages = {1441--1450},
-  numpages = {10},
-  url = {http://doi.acm.org/10.1145/3357384.3357895},
-  doi = {10.1145/3357384.3357895},
-  acmid = {3357895},
-  publisher = {ACM},
-  address = {New York, NY, USA}
+  publisher = {ACM}
 }
 ```
 
@@ -214,5 +280,6 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## Acknowledgments
 
+- NOVA paper authors for the non-invasive attention mechanism
 - Original BERT implementation by Google AI Language Team
-- BERT4Rec paper authors for the sequential recommendation approach
+- BERT4Rec paper authors for sequential recommendation with BERT
